@@ -6,45 +6,57 @@
 
 ---
 
-## 1. Executive Summary
-We built a multi-stage entity-resolution system to link each Source 1 business record to all corresponding records in Sources 2 and 3. The pipeline uses country-partitioned inverted-index blocking, a 36-feature gradient-boosted model, source-specific thresholds, and target-side conflict resolution. It is designed around the challenge's precision-weighted macro $F_{0.5}$ objective.
+## 1. Summary
 
-The saved held-out validation report records macro $F_{0.5}$ of **0.9408**, precision of **99.14%**, recall of **86.77%**, candidate recall of **95.28%**, and singleton accuracy of **97.97%**. The team-reported public leaderboard result was approximately **0.827 (82.7%)**. The exact portal score is not stored in the local artifacts, so it should be replaced with the exact displayed value before final packaging. Validation and leaderboard results are separate evaluations and are reported separately here.
+This solution links each Source 1 business to matching records in Sources 2 and 3. It first finds likely candidates, then scores them with a trained model. The design prioritizes precision because incorrect links are costly under the challenge's macro $F_{0.5}$ metric.
 
-The test run generated the required `matching_results.tsv` and `candidate_pairs.tsv`. Its saved report records 1,732,544 Source 1 entities, 34,461,015 candidate pairs, and 5,543,353 predicted links. No external business registries, geocoding services, or other external lookups are used.
+On the saved validation set, macro $F_{0.5}$ was **0.9408**, with **99.14% precision**, **86.77% recall**, and **95.28% candidate recall**. The team-reported public leaderboard result is approximately **0.827**; the exact portal value is not saved locally. These are different evaluations.
 
 ---
 
 ## 2. Methodology
 
-### 2.1 Problem Analysis
-Each Source 1 entity can match zero, one, or many Source 2 and Source 3 records. Names and addresses vary in spelling, punctuation, legal suffixes, transliteration, completeness, and ordering. The test set includes a country not present in training, so the pipeline treats country as a data value instead of hard-coding a fixed set of countries. Correctly identifying entities with no matches is important because singletons are included in the macro metric.
+### 2.1 The Task
 
-### 2.2 Solution Strategy
-The pipeline separates candidate generation from pair scoring. It normalizes names and addresses, uses a country-partitioned inverted index to keep pair comparisons tractable, ranks candidates by shared blocking keys, and scores up to 20 candidates per Source 1 entity. Validation-selected per-source thresholds and target-side conflict resolution produce the final links. The saved metadata identifies the selected model as XGBoost GPU and records 36 input features.
+For each Source 1 record, return every matching Source 2 or Source 3 ID. A record can have no matches; in that case, its output list must be empty. Names and addresses may be incomplete or differ in spelling, punctuation, script, abbreviations, and word order. Test data includes a country not seen in training, so country values are not hard-coded.
+
+### 2.2 The Matching Process
+
+```mermaid
+flowchart TD
+	records["Source 1 reference records + Source 2/3 target records"] --> clean["Normalize names and addresses"]
+	clean --> index["Build country-partitioned index"]
+	index --> candidates["Retrieve up to 20 candidates per Source 1"]
+	candidates --> pairs["Compare pairs with 36 features"]
+	pairs --> score["Score with XGBoost"]
+	score --> select["Apply thresholds and resolve target conflicts"]
+	candidates --> candidateOutput["candidate_pairs.tsv"]
+	select --> matchingOutput["matching_results.tsv"]
+```
+
+Each Source 1 record has one row in the matching output. Its match list is empty when no target passes the decision rules.
 
 ---
 
-## 3. Candidate Generation (Blocking)
-To limit pairwise comparisons, the pipeline creates a country-partitioned inverted index over target records and unions matches from multiple name/address keys. Keys include compact and core names, name tokens and token combinations, numeric/address combinations, name/number and name/city combinations, and pairs of significant address words. High-frequency keys are pruned to limit generic matches. Candidate records are ranked by shared-key count and capped at 20 per Source 1 entity.
+## 3. Candidate Generation
 
-The saved validation metadata reports **95.28% candidate recall**. This is the proportion of true links present in the candidate set; true links missed by blocking cannot be recovered at later stages. The test inference report records **34,461,015 candidate pairs**.
+The pipeline uses an inverted index to avoid comparing every Source 1 record with every target record. It retrieves targets that share useful name or address keys, removes overly common keys, and ranks candidates by shared-key count. The model scores at most 20 candidates per Source 1 record.
+
+On validation, **95.28% of true links were present in the candidate set**. A true match missed at this stage cannot be recovered by the model. The test run generated 34,461,015 candidate pairs.
 
 ---
 
 ## 4. Matching Model
-The final scorer uses **36 pairwise features**: 14 name similarity and token signals, address presence/similarity and numeric consistency signals, cross-field interactions, source indicators, and shared blocking-key count. Features include exact normalized and core-name equality, Levenshtein and Jaro-Winkler similarity, token overlap, character 3-gram similarity, address token similarity, and primary address-number agreement or conflict.
 
-The selected model recorded in `models/model_metadata.json` is **XGBoost GPU** (`xgboost_gpu`). The training script's default configuration uses 500 estimators, learning rate 0.035, maximum depth 7, and row and feature subsampling of 0.85. Training pairs include ground-truth positive links and hard negatives drawn from plausible blocking candidates.
+The model uses **36 features** to compare names, addresses, and address numbers. Examples include name similarity, shared address tokens, matching or conflicting street numbers, and how many candidate keys the pair shares. Training uses known matches plus difficult non-matching candidates that look similar.
 
-Thresholds selected on validation are $\tau_{S2}=0.70$ and $\tau_{S3}=0.75$. Inference applies an additional primary-number conflict penalty, preserves exact name-and-address matches with a confidence floor, and greedily enforces target-side exclusivity.
+The saved model is XGBoost configured for GPU use. On validation, the selected match thresholds were 0.70 for Source 2 and 0.75 for Source 3. Inference also reduces confidence for conflicting address numbers and prevents a target ID from being assigned to multiple Source 1 records.
 
 ---
 
-## 5. Results & Error Analysis
-### Validation Performance
+## 5. Results
 
-The figures below are from the saved validation report and model metadata. The validation set contains 10,000 Source 1 entities.
+The validation results below are from the saved report. They cover 10,000 held-out Source 1 entities.
 
 | Metric | Result |
 | :--- | ---: |
@@ -56,22 +68,15 @@ The figures below are from the saved validation report and model metadata. The v
 | False positives | 262 |
 | False negatives | 4,586 |
 
-The team-reported public leaderboard score was approximately **0.827 (82.7%)**. The exact portal value is not present in the local artifacts and should be verified before final packaging. It is distinct from the held-out validation result.
+The team-reported public leaderboard score is approximately **0.827**; the exact portal value is not stored locally. It is measured on a different set from the validation results above.
 
-### Error Considerations
-
-False positives can arise when distinct businesses share generic names or nearby addresses; numeric address mismatch features and target-side conflict resolution are intended to reduce these errors. False negatives can result when both name and address evidence are incomplete or heavily altered. The observed 95.28% candidate recall also means some true links may be excluded before scoring.
+Typical errors are false matches between businesses with similar names or addresses, and missed links where both fields are incomplete or heavily changed. Blocking also limits recall because matches not retrieved as candidates cannot be scored.
 
 ---
 
-## 6. Conclusion
-The pipeline combines deterministic text normalization, country-partitioned blocking, pairwise feature scoring, validation-selected thresholds, and target-side conflict handling. On the saved held-out validation run it reached macro $F_{0.5}=0.9408$ with 99.14% precision; the team-reported leaderboard score is approximately 0.827. The local test report records the generated outputs and inference totals. These results should be interpreted with the validation/leaderboard distinction and the packaging limitation described below.
+## 6. Reproduction and Submission
 
----
-
-## Appendix
-
-### A. Submission Structure
+### Required Archive Layout
 
 The requested archive layout is:
 
@@ -90,7 +95,7 @@ The requested archive layout is:
 
 The two required TSVs, the source directory, its README, and its requirements file are present in the current workspace. The pipeline is not yet reproducible from only `code/business_entity_resolution/`: test and training data, the saved model and metadata, `train.py`, and the validator are stored elsewhere in the repository. In addition, the pinned requirements file does not include XGBoost, which is required by the selected model. This documentation-only change does not alter code, dependencies, data, or model artifacts.
 
-### B. Current Repository Commands
+### Run From The Repository Root
 
 From the repository root, inference with the existing model and root-level test files is invoked as:
 
